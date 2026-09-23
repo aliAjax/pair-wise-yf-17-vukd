@@ -1,126 +1,162 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import { PIPES, VENUES, stopDef, stopsOfVenue } from "./data/catalog";
+import {
+  addReading,
+  archiveStop,
+  deleteReading,
+  loadState,
+  removeArchive,
+  saveMeasurement,
+  saveState,
+  updateReading,
+} from "./domain/store";
+import { buildStopReport, envDriftPct } from "./domain/rules";
+import type { MeasurementInput, PersistState, ReadingInput } from "./types";
+import TuningTab from "./ui/TuningTab";
+import ReportsTab from "./ui/ReportsTab";
+import ArchivesTab from "./ui/ArchivesTab";
 
-const project = {
-  "sourceNo": 7,
-  "id": "hxyfront-62005",
-  "port": 62005,
-  "title": "管风琴音管调音记录",
-  "domain": "管风琴维护",
-  "prompt": "做一个给管风琴维护人员使用的音管调音记录前端项目，可以记录教堂或音乐厅名称、音栓、音管编号、音高、音分偏差、温湿度、簧片状态和维修备注。页面需要有音栓列表、调音偏差表、温湿度记录、异常音管标记和单次维护报告页。",
-  "palette": [
-    "#854d0e",
-    "#475569",
-    "#0ea5e9"
-  ],
-  "metrics": [
-    "音栓数量",
-    "偏差超限",
-    "温度",
-    "湿度"
-  ],
-  "filters": [
-    "主音栓",
-    "簧片音栓",
-    "混合音栓",
-    "低音管"
-  ],
-  "fields": [
-    "场馆名称",
-    "音栓",
-    "音管编号",
-    "音高",
-    "音分偏差",
-    "维修备注"
-  ],
-  "records": [
-    [
-      "St.Mary",
-      "Trumpet 8'",
-      "C#4 +9cent",
-      "簧片需微调"
-    ],
-    [
-      "ConcertHall A",
-      "Principal 4'",
-      "G3 -3cent",
-      "正常"
-    ],
-    [
-      "Abbey Room",
-      "Bourdon 16'",
-      "F2 -12cent",
-      "标记复检"
-    ]
-  ]
-};
+type Tab = "tuning" | "reports" | "archives";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "tuning", label: "调音台" },
+  { id: "reports", label: "维护报告" },
+  { id: "archives", label: "维护存档" },
+];
 
 function App() {
+  const [state, setState] = useState<PersistState>(() => loadState());
+  const [venueId, setVenueId] = useState(VENUES[0].id);
+  const [tab, setTab] = useState<Tab>("tuning");
+
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  const runtime = state.runtime[venueId];
+  const drift = envDriftPct(runtime.readings);
+  const latest = runtime.readings[runtime.readings.length - 1];
+
+  const metrics = useMemo(() => {
+    const stopIds = stopsOfVenue(venueId).map((stop) => stop.id);
+    const pipeIds = PIPES.filter((pipe) => stopIds.includes(pipe.stopId)).map((pipe) => pipe.id);
+    const measured = pipeIds.filter((id) => runtime.pipes[id]?.measurements.length).length;
+    const reports = stopIds.map((id) => buildStopReport(id, runtime));
+    const retest = reports.reduce((sum, report) => sum + report.pendingRetest, 0);
+    const abnormal = reports.reduce((sum, report) => sum + report.abnormalCount, 0);
+    return { total: pipeIds.length, measured, retest, abnormal };
+  }, [venueId, runtime]);
+
+  const mutate = (next: PersistState) => setState(next);
+
+  const handleAddReading = (input: ReadingInput) =>
+    mutate(addReading(state, venueId, input));
+  const handleUpdateReading = (id: string, input: ReadingInput) =>
+    mutate(updateReading(state, venueId, id, input));
+  const handleDeleteReading = (id: string) =>
+    mutate(deleteReading(state, venueId, id));
+  const handleSaveMeasurement = (pipeId: string, input: MeasurementInput) =>
+    mutate(saveMeasurement(state, venueId, pipeId, input));
+  const handleClose = (stopId: string) => {
+    const { state: next, report } = archiveStop(state, venueId, stopId);
+    if (report) {
+      const stopName = stopDef(stopId)?.name ?? stopId;
+      setState(next);
+      window.alert(`「${stopName}」已结项，单次维护报告已冻结到维护存档。`);
+    }
+  };
+  const handleRemoveArchive = (archiveId: string) =>
+    mutate(removeArchive(state, archiveId));
+
   return (
     <main className="app">
-      <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
-      </section>
+      <header className="hero">
+        <p>管风琴维护 · 音管调音台</p>
+        <h1>音管调音记录台</h1>
+        <span>
+          预置两场馆、三音栓、八根音管；维护开始先填温湿度基准读数，同音栓全部测完且温湿度各自变化不超过
+          10% 才能结项。环境读数一经追加或改动，已测音管全部转待复测、原值只读；数据保存在本机浏览器。
+        </span>
+      </header>
+
+      <nav className="venue-tabs" aria-label="场馆切换">
+        {VENUES.map((venue) => (
+          <button
+            key={venue.id}
+            className={venue.id === venueId ? "active" : ""}
+            onClick={() => setVenueId(venue.id)}
+          >
+            <strong>{venue.name}</strong>
+            <small>{venue.place}</small>
+          </button>
+        ))}
+      </nav>
 
       <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[86, 14, 7, 32][index] ?? 12}</strong>
-          </article>
+        <article>
+          <small>音栓数量</small>
+          <strong>
+            {stopsOfVenue(venueId).length}
+            <em> 组 / {metrics.total} 管</em>
+          </strong>
+        </article>
+        <article>
+          <small>音管测量进度</small>
+          <strong>
+            {metrics.measured}/{metrics.total}
+            {metrics.retest > 0 && <em className="text-warn"> · {metrics.retest} 待复测</em>}
+          </strong>
+        </article>
+        <article>
+          <small>温度 / 湿度（最新）</small>
+          <strong className="metric-env">
+            {latest ? `${latest.temperature}°` : "—"}
+            <em> / {latest ? `${latest.humidity}%` : "—"}</em>
+          </strong>
+          {latest && (
+            <small className={drift.temperature !== null && drift.humidity !== null && drift.temperature <= 10 && drift.humidity <= 10 ? "ok" : "bad"}>
+              变化 温{(drift.temperature ?? 0).toFixed(1)}% 湿{(drift.humidity ?? 0).toFixed(1)}%
+            </small>
+          )}
+        </article>
+        <article>
+          <small>偏差超限（≥10 音分）</small>
+          <strong className={metrics.abnormal ? "text-danger" : ""}>
+            {metrics.abnormal}
+            <em> 管异常</em>
+          </strong>
+        </article>
+      </section>
+
+      <div className="tabs" role="tablist">
+        {TABS.map((item) => (
+          <button key={item.id} role="tab" className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>
+            {item.label}
+          </button>
         ))}
-      </section>
+      </div>
 
-      <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}筛选</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel form-panel">
-          <div className="heading">
-            <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
-            </div>
-            <button className="primary">保存草稿</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="panel">
-        <div className="heading">
-          <div>
-            <p>历史记录</p>
-            <h2>近期工作台</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      {tab === "tuning" && (
+        <TuningTab
+          venueId={venueId}
+          runtime={runtime}
+          archives={state.archives}
+          onAddReading={handleAddReading}
+          onUpdateReading={handleUpdateReading}
+          onDeleteReading={handleDeleteReading}
+          onSaveMeasurement={handleSaveMeasurement}
+        />
+      )}
+      {tab === "reports" && (
+        <ReportsTab
+          venueId={venueId}
+          runtime={runtime}
+          archives={state.archives}
+          onClose={handleClose}
+        />
+      )}
+      {tab === "archives" && <ArchivesTab archives={state.archives} onRemove={handleRemoveArchive} />}
     </main>
   );
 }
