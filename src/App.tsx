@@ -1,128 +1,183 @@
+import { useEffect, useMemo, useReducer, useState } from "react";
+import { emptyState, loadState, reducer, saveState } from "./domain/store";
+import { buildReport, envVariation } from "./domain/rules";
+import { pipesOfStop, stopsOfVenue, venueById } from "./domain/presets";
+import { ArchiveModal } from "./ui/ArchiveModal";
+import { EnvironmentPanel } from "./ui/EnvironmentPanel";
+import { PipeTable } from "./ui/PipeTable";
+import { ReportView } from "./ui/ReportView";
+import { StartScreen } from "./ui/StartScreen";
 import "./styles.css";
 
-const project = {
-  "sourceNo": 7,
-  "id": "hxyfront-62005",
-  "port": 62005,
-  "title": "管风琴音管调音记录",
-  "domain": "管风琴维护",
-  "prompt": "做一个给管风琴维护人员使用的音管调音记录前端项目，可以记录教堂或音乐厅名称、音栓、音管编号、音高、音分偏差、温湿度、簧片状态和维修备注。页面需要有音栓列表、调音偏差表、温湿度记录、异常音管标记和单次维护报告页。",
-  "palette": [
-    "#854d0e",
-    "#475569",
-    "#0ea5e9"
-  ],
-  "metrics": [
-    "音栓数量",
-    "偏差超限",
-    "温度",
-    "湿度"
-  ],
-  "filters": [
-    "主音栓",
-    "簧片音栓",
-    "混合音栓",
-    "低音管"
-  ],
-  "fields": [
-    "场馆名称",
-    "音栓",
-    "音管编号",
-    "音高",
-    "音分偏差",
-    "维修备注"
-  ],
-  "records": [
-    [
-      "St.Mary",
-      "Trumpet 8'",
-      "C#4 +9cent",
-      "簧片需微调"
-    ],
-    [
-      "ConcertHall A",
-      "Principal 4'",
-      "G3 -3cent",
-      "正常"
-    ],
-    [
-      "Abbey Room",
-      "Bourdon 16'",
-      "F2 -12cent",
-      "标记复检"
-    ]
-  ]
-};
+function Console() {
+  const [state, dispatch] = useReducer(reducer, undefined, () =>
+    typeof localStorage === "undefined" ? emptyState() : loadState(),
+  );
+  const [selectedStop, setSelectedStop] = useState<string | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveSelected, setArchiveSelected] = useState<string | null>(null);
 
-function App() {
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  const session = state.session;
+  const stops = session ? stopsOfVenue(session.venueId) : [];
+  const activeStopId =
+    session && selectedStop && stops.some((s) => s.id === selectedStop)
+      ? selectedStop
+      : stops[0]?.id ?? null;
+
+  // 实时报告：偏差表、异常标记、单次报告均由 buildReport 同一份数据派生
+  const report = useMemo(
+    () => (session && activeStopId ? buildReport(session, activeStopId, Date.now()) : null),
+    [session, activeStopId],
+  );
+
+  // 没有进行中的维护：回到开工页
+  if (!session) {
+    return (
+      <>
+        <StartScreen
+          hasArchive={state.archive.length > 0}
+          onOpenArchive={() => {
+            setArchiveOpen(true);
+            setArchiveSelected(state.archive[0]?.id ?? null);
+          }}
+          onStart={(venueId) => {
+            const first = stopsOfVenue(venueId)[0];
+            dispatch({ type: "start", input: { venueId, at: Date.now() } });
+            setSelectedStop(first?.id ?? null);
+          }}
+        />
+        {archiveOpen && (
+          <ArchiveModal
+            reports={state.archive}
+            selectedId={archiveSelected}
+            onSelect={setArchiveSelected}
+            onClose={() => setArchiveOpen(false)}
+          />
+        )}
+      </>
+    );
+  }
+
+  const venue = venueById(session.venueId);
+  const stopId = activeStopId as string;
+  const activeStop = stops.find((s) => s.id === stopId)!;
+  const activePipes = pipesOfStop(stopId);
+  const env = envVariation(session.readings);
+  const closedInfo = session.closed[stopId];
+  const isClosed = Boolean(closedInfo);
+
+  const stopSummaries = stops.map((s) => {
+    const defs = pipesOfStop(s.id);
+    const done = defs.filter((p) => session.pipes[p.id].status === "measured").length;
+    const recheck = defs.filter((p) => session.pipes[p.id].status === "recheck").length;
+    return { stop: s, done, total: defs.length, recheck, closed: Boolean(session.closed[s.id]) };
+  });
+
   return (
-    <main className="app">
-      <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
-      </section>
+    <main className="app console">
+      <header className="console-head">
+        <div>
+          <p className="eyebrow">维护中 · {venue.name}</p>
+          <h1>{venue.organ} · 音管调音台</h1>
+        </div>
+        <div className="head-actions">
+          <button onClick={() => setArchiveOpen(true)}>结项存档（{state.archive.length}）</button>
+          <button
+            className="danger"
+            onClick={() => {
+              const allClosed = stops.every((s) => session.closed[s.id]);
+              const msg = allClosed
+                ? "结束本次维护并关闭工作台？（报告均已存档）"
+                : "还有音栓未结项，结束后未结项数据将不保留为报告。确定结束？";
+              if (window.confirm(msg)) dispatch({ type: "finishSession" });
+            }}
+          >
+            结束维护
+          </button>
+        </div>
+      </header>
 
-      <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[86, 14, 7, 32][index] ?? 12}</strong>
-          </article>
+      <nav className="stop-tabs">
+        {stopSummaries.map(({ stop, done, total, recheck, closed }) => (
+          <button key={stop.id} className={stop.id === stopId ? "active" : ""} onClick={() => setSelectedStop(stop.id)}>
+            <b>{stop.name}</b>
+            <span>
+              {done}/{total} 已测{recheck > 0 ? ` · ${recheck} 待复测` : ""}
+            </span>
+            {closed && <em className="closed-dot">已结项</em>}
+          </button>
         ))}
-      </section>
+      </nav>
 
-      <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}筛选</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
+      <div className="console-grid">
+        <div className="left-col">
+          <EnvironmentPanel
+            readings={session.readings}
+            tempVarPct={env.tempVarPct}
+            humVarPct={env.humVarPct}
+            onAdd={(input) => dispatch({ type: "addReading", input })}
+            onEdit={(input) => dispatch({ type: "editReading", input })}
+          />
+        </div>
 
-        <section className="panel form-panel">
+        <section className="panel pipe-panel">
           <div className="heading">
             <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
+              <p className="eyebrow">
+                {activeStop.label} · {activeStop.kind === "reed" ? "簧管音栓" : "唇管音栓"}
+              </p>
+              <h2>调音偏差表</h2>
             </div>
-            <button className="primary">保存草稿</button>
+            <div className="heading-actions">
+              {isClosed && <span className="pill status-measured">已结项</span>}
+              <button onClick={() => setShowReport((v) => !v)}>{showReport ? "收起报告" : "查看单次报告"}</button>
+            </div>
           </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
 
-      <section className="panel">
-        <div className="heading">
-          <div>
-            <p>历史记录</p>
-            <h2>近期工作台</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+          <PipeTable
+            stop={activeStop}
+            pipes={activePipes}
+            state={session.pipes}
+            readings={session.readings}
+            closed={isClosed}
+            onSave={(input) => dispatch({ type: "saveMeasure", input })}
+            onRecheck={(pipeId) => dispatch({ type: "recheckPipe", pipeId })}
+          />
+        </section>
+      </div>
+
+      {showReport && (
+        <section className="panel report-panel">
+          <ReportView
+            report={report!}
+            onClose={
+              isClosed
+                ? undefined
+                : () =>
+                    window.confirm("确认结项？结项后该音栓数据锁定并生成存档报告。") &&
+                    dispatch({ type: "closeStop", stopId: stopId, at: Date.now() })
+            }
+          />
+        </section>
+      )}
+
+      {archiveOpen && (
+        <ArchiveModal
+          reports={state.archive}
+          selectedId={archiveSelected}
+          onSelect={setArchiveSelected}
+          onClose={() => setArchiveOpen(false)}
+        />
+      )}
     </main>
   );
 }
 
-export default App;
+export default function App() {
+  return <Console />;
+}
